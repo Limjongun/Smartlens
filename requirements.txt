@@ -1,0 +1,5 @@
+ultralytics
+opencv-python
+PySide6
+SQLAlchemy
+numpy

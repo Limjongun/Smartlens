@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pt
+*.engine
+*.sqlite
+.idea/
+.vscode/
