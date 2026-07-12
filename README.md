@@ -34,7 +34,7 @@ Every tracking session generates a unique database session (e.g., `inf_001`).
 
 ---
 
-## 🚀 Getting Started (Step-by-Step Guide)
+ Getting Started (Step-by-Step Guide)
 
 ### 1. Clone the Repository
 ```bash
