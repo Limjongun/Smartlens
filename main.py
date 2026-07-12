@@ -1,93 +1,119 @@
 import sys
+import os
 import cv2
 import numpy as np
 import random
 from PySide6.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, 
-                               QHBoxLayout, QWidget, QPushButton, QComboBox, QLineEdit, QFrame, QFileDialog, QSlider, QCheckBox, QScrollArea, QInputDialog)
+                               QHBoxLayout, QWidget, QPushButton, QLineEdit, QFrame, QFileDialog, QSlider, QCheckBox, QScrollArea, QInputDialog, QListWidget, QListWidgetItem)
 from PySide6.QtGui import QImage, QPixmap, QFont, QPainter, QPen, QColor, QPolygon, QBrush
 from PySide6.QtCore import Qt, QPoint
 from inference import InferenceThread
+from ultralytics import YOLO
+from database import init_db, InferenceSession
+from dashboard import DashboardWindow
 
 MODERN_STYLE = """
 QMainWindow {
-    background-color: #1e1e2e;
+    background-color: #11111b; /* Darker background */
 }
 QLabel {
     color: #cdd6f4;
     font-family: 'Segoe UI', Arial, sans-serif;
 }
 QFrame#card {
-    background-color: #313244;
-    border-radius: 10px;
-    padding: 10px;
+    background-color: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 12px;
+    padding: 15px;
 }
-QLineEdit, QComboBox {
+QLineEdit, QListWidget {
     background-color: #181825;
     color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 5px;
-    padding: 8px;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    padding: 10px;
     font-size: 14px;
 }
-QLineEdit:focus, QComboBox:focus {
-    border: 1px solid #89b4fa;
+QLineEdit:focus, QListWidget:focus {
+    border: 1px solid #8caaee;
+    background-color: #1e1e2e;
+}
+QListWidget::item {
+    padding: 8px;
+    border-radius: 5px;
+    margin-bottom: 2px;
+}
+QListWidget::item:hover {
+    background-color: #313244;
+}
+QListWidget::item:selected {
+    background-color: #45475a;
+    color: #8caaee;
+    border-left: 3px solid #8caaee;
 }
 QPushButton {
     border: none;
-    border-radius: 5px;
+    border-radius: 8px;
     padding: 10px 20px;
     font-size: 14px;
     font-weight: bold;
 }
 QPushButton#browseBtn {
-    background-color: #89b4fa;
-    color: #11111b;
+    background-color: #8caaee;
+    color: #232634;
 }
 QPushButton#browseBtn:hover {
-    background-color: #b4befe;
+    background-color: #99d1db;
 }
 QPushButton#startBtn {
-    background-color: #a6e3a1;
-    color: #11111b;
+    background-color: #a6d189;
+    color: #232634;
 }
 QPushButton#startBtn:hover {
-    background-color: #94e2d5;
+    background-color: #81c8be;
 }
 QPushButton#stopBtn {
-    background-color: #f38ba8;
-    color: #11111b;
+    background-color: #e78284;
+    color: #232634;
 }
 QPushButton#stopBtn:hover {
-    background-color: #eba0ac;
+    background-color: #ea999c;
 }
 QPushButton#pauseBtn {
-    background-color: #f9e2af;
-    color: #11111b;
+    background-color: #e5c890;
+    color: #232634;
 }
 QPushButton#pauseBtn:hover {
-    background-color: #fab387;
+    background-color: #ef9f76;
 }
 QPushButton#clearBtn {
-    background-color: #cba6f7;
-    color: #11111b;
+    background-color: #ca9ee6;
+    color: #232634;
 }
 QPushButton#clearBtn:hover {
-    background-color: #b4befe;
+    background-color: #babbf1;
 }
 QPushButton:disabled {
-    background-color: #45475a;
-    color: #a6adc8;
+    background-color: #414559;
+    color: #a5adce;
 }
 QSlider::groove:horizontal {
-    border: 1px solid #45475a;
-    height: 8px;
+    border: 1px solid #313244;
+    height: 6px;
     background: #181825;
     margin: 2px 0;
-    border-radius: 4px;
+    border-radius: 3px;
 }
 QSlider::handle:horizontal {
-    background: #89b4fa;
-    border: 1px solid #89b4fa;
+    background: #8caaee;
+    border: 1px solid #8caaee;
+    width: 16px;
+    margin: -5px 0;
+    border-radius: 8px;
+}
+QSlider::handle:horizontal:hover {
+    background: #99d1db;
+    border: 1px solid #99d1db;
     width: 18px;
     margin: -6px 0;
     border-radius: 9px;
@@ -95,18 +121,47 @@ QSlider::handle:horizontal {
 QCheckBox {
     color: #cdd6f4;
     font-size: 14px;
-    spacing: 8px;
+    spacing: 10px;
+    padding: 5px;
+}
+QCheckBox:hover {
+    background-color: #1e1e2e;
+    border-radius: 5px;
 }
 QCheckBox::indicator {
     width: 18px;
     height: 18px;
     border-radius: 4px;
-    border: 1px solid #45475a;
-    background-color: #181825;
+    border: 2px solid #45475a;
+    background-color: #11111b;
+}
+QCheckBox::indicator:hover {
+    border: 2px solid #8caaee;
 }
 QCheckBox::indicator:checked {
-    background-color: #89b4fa;
-    border: 1px solid #89b4fa;
+    background-color: #8caaee;
+    border: 2px solid #8caaee;
+}
+QScrollBar:vertical {
+    border: none;
+    background: #11111b;
+    width: 8px;
+    margin: 0px 0px 0px 0px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #45475a;
+    min-height: 30px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #585b70;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
 }
 """
 
@@ -161,7 +216,7 @@ class InteractiveVideoLabel(QLabel):
                 
     def mouseReleaseEvent(self, event):
         if self.dragging == 'Polygon':
-            if len(self.app.current_polygon) > 10: # ensure it's an actual drawing, not a misclick
+            if len(self.app.current_polygon) > 10:
                 name, ok = QInputDialog.getText(self, "Area Segmentation", "Masukan nama area ini (Contoh: Trotoar, Bahu Jalan):")
                 if ok and name.strip():
                     color = (random.randint(100, 255), random.randint(100, 255), random.randint(100, 255))
@@ -199,7 +254,6 @@ class InteractiveVideoLabel(QLabel):
         painter.drawLine(0, y_b, self.width(), y_b)
         painter.drawText(10, y_b - 5, "Line B (End)")
 
-        # Draw Saved Custom Regions if inference is NOT running (otherwise OpenCV draws them on the frame)
         if self.app.inference_thread is None or self.app.inference_thread.paused:
             for region in self.app.custom_regions:
                 r, g, b = region["color"]
@@ -207,7 +261,7 @@ class InteractiveVideoLabel(QLabel):
                 pen.setWidth(2)
                 painter.setPen(pen)
                 
-                brush_color = QColor(b, g, r, 70) # Semi transparent
+                brush_color = QColor(b, g, r, 70) 
                 painter.setBrush(QBrush(brush_color))
                 
                 qpoly = QPolygon()
@@ -215,9 +269,8 @@ class InteractiveVideoLabel(QLabel):
                     qpoly.append(QPoint(int(px * self.width()), int(py * self.height())))
                 painter.drawPolygon(qpoly)
 
-        # Draw Currently Drawing Polygon
         if self.app.current_polygon:
-            pen = QPen(QColor(255, 255, 0)) # Yellow while drawing
+            pen = QPen(QColor(255, 255, 0))
             pen.setWidth(2)
             painter.setPen(pen)
             for i in range(1, len(self.app.current_polygon)):
@@ -231,14 +284,23 @@ class SmartLensApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Smart Lens - Interactive Spatial & Speed Tracker")
-        self.resize(1200, 950)
+        self.resize(1300, 950)
         self.setStyleSheet(MODERN_STYLE)
         
         self.line_a_pct = 0.3
         self.line_b_pct = 0.7
         self.custom_regions = []
         self.current_polygon = []
-        self.region_labels = {} # name -> QLabel
+        self.region_labels = {} 
+        self.class_checkboxes = {}
+        self.class_stat_labels = {}
+        
+        self.active_model_paths = []
+        self.global_names = {}
+        self.model_to_global = {}
+
+        self.dashboard_window = None
+        self.SessionLocal = init_db()
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -252,7 +314,7 @@ class SmartLensApp(QMainWindow):
         # ================= SIDEBAR =================
         sidebar = QFrame()
         sidebar.setObjectName("card")
-        sidebar.setFixedWidth(280)
+        sidebar.setFixedWidth(300)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setAlignment(Qt.AlignTop)
         
@@ -301,30 +363,17 @@ class SmartLensApp(QMainWindow):
         
         sidebar_layout.addSpacing(20)
         
-        classes_label = QLabel("Vehicle Classes:")
+        classes_label = QLabel("Detection Classes:")
         classes_label.setFont(QFont("Segoe UI", 12))
         sidebar_layout.addWidget(classes_label)
         
-        self.chk_car = QCheckBox("Car (Mobil)")
-        self.chk_car.setChecked(True)
-        self.chk_car.stateChanged.connect(self.update_detection_config)
-        
-        self.chk_motorcycle = QCheckBox("Motorcycle (Motor)")
-        self.chk_motorcycle.setChecked(True)
-        self.chk_motorcycle.stateChanged.connect(self.update_detection_config)
-        
-        self.chk_bus = QCheckBox("Bus")
-        self.chk_bus.setChecked(True)
-        self.chk_bus.stateChanged.connect(self.update_detection_config)
-        
-        self.chk_truck = QCheckBox("Truck (Truk)")
-        self.chk_truck.setChecked(True)
-        self.chk_truck.stateChanged.connect(self.update_detection_config)
-        
-        sidebar_layout.addWidget(self.chk_car)
-        sidebar_layout.addWidget(self.chk_motorcycle)
-        sidebar_layout.addWidget(self.chk_bus)
-        sidebar_layout.addWidget(self.chk_truck)
+        self.classes_scroll = QScrollArea()
+        self.classes_scroll.setWidgetResizable(True)
+        self.classes_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        self.classes_widget = QWidget()
+        self.classes_layout = QVBoxLayout(self.classes_widget)
+        self.classes_scroll.setWidget(self.classes_widget)
+        sidebar_layout.addWidget(self.classes_scroll, stretch=1)
         
         sidebar_layout.addSpacing(20)
         
@@ -369,11 +418,10 @@ class SmartLensApp(QMainWindow):
         self.browse_btn.setObjectName("browseBtn")
         self.browse_btn.clicked.connect(self.browse_video)
 
-        self.model_combo = QComboBox()
-        self.model_combo.addItems([
-            "yolo11n.pt", 
-            "yolo11n.engine"
-        ])
+        self.models_list = QListWidget()
+        self.models_list.setMaximumHeight(80)
+        self.models_list.setMinimumWidth(200)
+        self.models_list.itemChanged.connect(self.on_models_changed)
 
         self.start_btn = QPushButton("Start")
         self.start_btn.setObjectName("startBtn")
@@ -392,15 +440,21 @@ class SmartLensApp(QMainWindow):
         self.clear_btn = QPushButton("Clear Regions")
         self.clear_btn.setObjectName("clearBtn")
         self.clear_btn.clicked.connect(self.clear_custom_regions)
+        
+        self.dashboard_btn = QPushButton("Dashboard")
+        self.dashboard_btn.setObjectName("startBtn")
+        self.dashboard_btn.clicked.connect(self.open_dashboard)
 
         top_layout.addWidget(QLabel("Source:"))
         top_layout.addWidget(self.source_input, stretch=2)
         top_layout.addWidget(self.browse_btn)
-        top_layout.addWidget(self.model_combo, stretch=1)
+        top_layout.addWidget(QLabel("Models:"))
+        top_layout.addWidget(self.models_list, stretch=1)
         top_layout.addWidget(self.start_btn)
         top_layout.addWidget(self.pause_btn)
         top_layout.addWidget(self.stop_btn)
         top_layout.addWidget(self.clear_btn)
+        top_layout.addWidget(self.dashboard_btn)
         
         content_layout.addWidget(controls_card)
         
@@ -416,31 +470,37 @@ class SmartLensApp(QMainWindow):
         
         content_layout.addWidget(video_card, stretch=1)
 
-        # Stats Dashboard Card
-        stats_card = QFrame()
-        stats_card.setObjectName("card")
-        stats_layout = QHBoxLayout(stats_card)
+        # ================= RIGHT SIDEBAR =================
+        right_sidebar = QFrame()
+        right_sidebar.setObjectName("card")
+        right_sidebar.setFixedWidth(300)
+        right_sidebar_layout = QVBoxLayout(right_sidebar)
+        right_sidebar_layout.setAlignment(Qt.AlignTop)
         
-        self.lbl_car = QLabel("🚗 Car: 0")
-        self.lbl_motor = QLabel("🏍️ Motor: 0")
-        self.lbl_bus = QLabel("🚌 Bus: 0")
-        self.lbl_truck = QLabel("🚚 Truck: 0")
+        stats_label = QLabel("Detection Stats")
+        stats_label.setFont(QFont("Segoe UI", 18, QFont.Bold))
+        stats_label.setStyleSheet("color: #f5c2e7;")
+        right_sidebar_layout.addWidget(stats_label)
+        
         self.lbl_total = QLabel("Total In Frame: 0")
+        self.lbl_total.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.lbl_total.setStyleSheet("color: #f9e2af;")
+        self.lbl_total.setAlignment(Qt.AlignLeft)
+        right_sidebar_layout.addWidget(self.lbl_total)
         
-        for lbl in [self.lbl_car, self.lbl_motor, self.lbl_bus, self.lbl_truck, self.lbl_total]:
-            lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
-            lbl.setAlignment(Qt.AlignCenter)
-            lbl.setStyleSheet("color: #a6e3a1;")
+        right_sidebar_layout.addSpacing(10)
         
-        self.lbl_total.setStyleSheet("color: #f9e2af; font-size: 18px;")
-
-        stats_layout.addWidget(self.lbl_car)
-        stats_layout.addWidget(self.lbl_motor)
-        stats_layout.addWidget(self.lbl_bus)
-        stats_layout.addWidget(self.lbl_truck)
-        stats_layout.addWidget(self.lbl_total)
+        self.stats_scroll = QScrollArea()
+        self.stats_scroll.setWidgetResizable(True)
+        self.stats_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
         
-        content_layout.addWidget(stats_card)
+        self.stats_widget = QWidget()
+        self.stats_layout = QVBoxLayout(self.stats_widget)
+        self.stats_layout.setAlignment(Qt.AlignTop)
+        self.stats_scroll.setWidget(self.stats_widget)
+        right_sidebar_layout.addWidget(self.stats_scroll, stretch=1)
+        
+        main_layout.addWidget(right_sidebar)
         
         # Region Tracking Cards
         self.region_container = QFrame()
@@ -448,15 +508,115 @@ class SmartLensApp(QMainWindow):
         self.region_container_layout = QHBoxLayout(self.region_container)
         self.region_container_layout.setAlignment(Qt.AlignLeft)
         content_layout.addWidget(self.region_container)
-        self.region_container.hide() # Hidden until regions are drawn
+        self.region_container.hide() 
 
         scroll_area.setWidget(main_widget)
         self.setCentralWidget(scroll_area)
 
         self.inference_thread = None
+        
+        # Load Models Directory
+        self.load_available_models()
+
+    def load_available_models(self):
+        models_dir = "models"
+        os.makedirs(models_dir, exist_ok=True)
+        
+        for f in ["yolo11n.pt", "yolo11n.engine"]:
+            if os.path.exists(f) and not os.path.exists(os.path.join(models_dir, f)):
+                import shutil
+                try:
+                    shutil.move(f, os.path.join(models_dir, f))
+                except Exception as e:
+                    print(e)
+                    
+        files = []
+        if os.path.exists(models_dir):
+            files = [f for f in os.listdir(models_dir) if f.endswith('.pt') or f.endswith('.engine')]
+            
+        if not files:
+            files = ["yolo11n.pt"] 
+            
+        self.models_list.blockSignals(True)
+        self.models_list.clear()
+        for f in files:
+            item = QListWidgetItem(f)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if f == "yolo11n.pt" else Qt.Unchecked)
+            self.models_list.addItem(item)
+        self.models_list.blockSignals(False)
+        
+        self.on_models_changed()
+
+    def on_models_changed(self):
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("Loading...")
+        QApplication.processEvents()
+        
+        self.active_model_paths = []
+        for i in range(self.models_list.count()):
+            item = self.models_list.item(i)
+            if item.checkState() == Qt.Checked:
+                m_filename = item.text()
+                m_path = os.path.join("models", m_filename)
+                if not os.path.exists(m_path):
+                    m_path = m_filename
+                self.active_model_paths.append(m_path)
+                
+        self.global_names = {}
+        self.model_to_global = {}
+        global_id = 0
+        
+        for m_path in self.active_model_paths:
+            try:
+                model = YOLO(m_path, task='detect')
+                self.model_to_global[m_path] = {}
+                m_name = os.path.basename(m_path)
+                
+                for local_cls, cls_name in model.names.items():
+                    global_cls_name = f"{m_name.split('.')[0]}: {cls_name}"
+                    self.global_names[global_id] = global_cls_name
+                    self.model_to_global[m_path][local_cls] = global_id
+                    global_id += 1
+            except Exception as e:
+                print(f"Error inspecting {m_path}:", e)
+                
+        self.rebuild_dynamic_ui()
+        
+        self.start_btn.setEnabled(True)
+        self.start_btn.setText("Start")
+        
+    def rebuild_dynamic_ui(self):
+        # 1. Rebuild Checkboxes
+        while self.classes_layout.count():
+            item = self.classes_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        self.class_checkboxes = {}
+        for cls_id, cls_name in self.global_names.items():
+            chk = QCheckBox(cls_name.capitalize())
+            # By default, check only the first 15 to avoid lag if many classes
+            if cls_id < 15:
+                chk.setChecked(True)
+            chk.stateChanged.connect(self.update_detection_config)
+            self.classes_layout.addWidget(chk)
+            self.class_checkboxes[cls_id] = chk
+            
+        # 2. Rebuild Stats Labels
+        while self.stats_layout.count():
+            item = self.stats_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        self.class_stat_labels = {}
+        for cls_id, cls_name in self.global_names.items():
+            lbl = QLabel(f"{cls_name.capitalize()}: 0")
+            lbl.setFont(QFont("Segoe UI", 12, QFont.Bold))
+            lbl.setAlignment(Qt.AlignLeft)
+            lbl.setStyleSheet("color: #a6e3a1; margin-bottom: 5px;")
+            self.stats_layout.addWidget(lbl)
+            self.class_stat_labels[cls_id] = lbl
 
     def refresh_region_cards(self):
-        # Clear layout
         while self.region_container_layout.count():
             item = self.region_container_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -485,7 +645,7 @@ class SmartLensApp(QMainWindow):
             title.setAlignment(Qt.AlignCenter)
             title.setStyleSheet("color: #cdd6f4;")
             
-            val_lbl = QLabel("0 Vehicles")
+            val_lbl = QLabel("0 Detected")
             val_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
             val_lbl.setAlignment(Qt.AlignCenter)
             val_lbl.setStyleSheet("color: #a6e3a1;")
@@ -525,10 +685,9 @@ class SmartLensApp(QMainWindow):
         self.dist_val_label.setText(f"{dist_val}m")
         
         active_classes = []
-        if self.chk_car.isChecked(): active_classes.append(2)
-        if self.chk_motorcycle.isChecked(): active_classes.append(3)
-        if self.chk_bus.isChecked(): active_classes.append(5)
-        if self.chk_truck.isChecked(): active_classes.append(7)
+        for cls_id, chk in self.class_checkboxes.items():
+            if chk.isChecked():
+                active_classes.append(cls_id)
         
         if self.inference_thread is not None:
             self.inference_thread.set_detection_config(
@@ -538,17 +697,46 @@ class SmartLensApp(QMainWindow):
                 float(color_val),
                 self.line_a_pct,
                 self.line_b_pct,
-                self.custom_regions
+                self.custom_regions,
+                self.model_to_global
             )
+
+    def open_dashboard(self):
+        if self.dashboard_window is None:
+            self.dashboard_window = DashboardWindow()
+        self.dashboard_window.refresh_sessions()
+        self.dashboard_window.show()
 
     def start_inference(self):
         source = self.source_input.text()
         if source.isdigit():
             source = int(source)
 
-        model_path = "yolo11n.engine" if "engine" in self.model_combo.currentText() else "yolo11n.pt"
+        if not self.active_model_paths:
+            print("No models selected!")
+            return
+            
+        # Generate new session ID
+        db = self.SessionLocal()
+        from sqlalchemy import desc
+        last_session = db.query(InferenceSession).order_by(desc(InferenceSession.id)).first()
+        if last_session:
+            try:
+                last_num = int(last_session.session_name.split('_')[1])
+                new_num = last_num + 1
+            except:
+                new_num = 1
+        else:
+            new_num = 1
+            
+        session_name = f"inf_{new_num:03d}"
+        
+        new_session = InferenceSession(session_name=session_name, source=str(source))
+        db.add(new_session)
+        db.commit()
+        db.close()
 
-        self.inference_thread = InferenceThread(model_path=model_path, source=source)
+        self.inference_thread = InferenceThread(model_paths=self.active_model_paths, source=source, session_name=session_name)
         
         self.update_detection_config()
         
@@ -563,7 +751,7 @@ class SmartLensApp(QMainWindow):
         self.pause_btn.setText("Pause")
         self.source_input.setEnabled(False)
         self.browse_btn.setEnabled(False)
-        self.model_combo.setEnabled(False)
+        self.models_list.setEnabled(False)
 
     def stop_inference(self):
         if self.inference_thread is not None:
@@ -576,7 +764,7 @@ class SmartLensApp(QMainWindow):
         self.pause_btn.setText("Pause")
         self.source_input.setEnabled(True)
         self.browse_btn.setEnabled(True)
-        self.model_combo.setEnabled(True)
+        self.models_list.setEnabled(True)
         self.video_label.setText("Video Stream Stopped")
         self.video_label.setPixmap(QPixmap())
 
@@ -600,16 +788,17 @@ class SmartLensApp(QMainWindow):
 
     def update_stats(self, stats):
         self.lbl_total.setText(f"In Frame: {stats['current_in_frame']}")
+        
         counts = stats.get("counts_per_class", {})
-        self.lbl_car.setText(f"🚗 Car: {counts.get('car', 0)}")
-        self.lbl_motor.setText(f"🏍️ Motor: {counts.get('motorcycle', 0)}")
-        self.lbl_bus.setText(f"🚌 Bus: {counts.get('bus', 0)}")
-        self.lbl_truck.setText(f"🚚 Truck: {counts.get('truck', 0)}")
+        for cls_id, lbl in self.class_stat_labels.items():
+            cnt = counts.get(cls_id, 0)
+            cls_name = self.global_names.get(cls_id, "Unknown").capitalize()
+            lbl.setText(f"{cls_name}: {cnt}")
         
         region_counts = stats.get("region_counts", {})
         for name, lbl in self.region_labels.items():
             cnt = region_counts.get(name, 0)
-            lbl.setText(f"{cnt} Vehicles")
+            lbl.setText(f"{cnt} Detected")
 
     def closeEvent(self, event):
         self.stop_inference()

@@ -3,3 +3,5 @@ opencv-python
 PySide6
 SQLAlchemy
 numpy
+matplotlib
+pandas

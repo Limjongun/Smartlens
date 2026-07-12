@@ -1,64 +1,84 @@
+import time
 import cv2
+import os
 from PySide6.QtCore import QThread, Signal
 from ultralytics import YOLO
-from database import VehicleLog, init_db
+from database import VehicleLog, ViolationLog, init_db
 import numpy as np
 
-# Custom Colors (B, G, R) for OpenCV per Class
-CLASS_COLORS = {
-    2: (255, 0, 0),    # Car: Blue
-    3: (0, 255, 0),    # Motorcycle: Green
-    5: (0, 255, 255),  # Bus: Yellow
-    7: (0, 0, 255)     # Truck: Red
-}
+from collections import defaultdict
+
+def get_class_color(cls_id):
+    """Generate a deterministic color for any class ID."""
+    np.random.seed(int(cls_id) * 123)
+    return tuple(int(x) for x in np.random.randint(50, 255, 3))
 
 def get_dominant_color(frame, bbox, threshold=None):
     """Estimate dominant color of the vehicle using K-Means and HSV space."""
-    x1, y1, x2, y2 = bbox
-    w, h = x2 - x1, y2 - y1
-    if w <= 0 or h <= 0:
-        return "Unknown"
+    x1, y1, x2, y2 = map(int, bbox)
     
-    # Smart Crop: Lower middle section to avoid windshields and tires/shadows
-    cy1 = y1 + int(h * 0.4)
-    cy2 = y1 + int(h * 0.8)
-    cx1 = x1 + int(w * 0.25)
-    cx2 = x1 + int(w * 0.75)
+    # Clip to frame boundaries
+    h, w = frame.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
     
-    roi = frame[cy1:cy2, cx1:cx2]
-    if roi.size == 0:
-        return "Unknown"
-        
-    pixels = np.float32(roi.reshape(-1, 3))
-    if len(pixels) < 5:
+    # Crop the lower-middle portion of the vehicle (avoids windows and shadows)
+    crop_h = y2 - y1
+    crop_w = x2 - x1
+    
+    if crop_h < 10 or crop_w < 10:
         return "Unknown"
         
-    # K-Means clustering to find 2 dominant colors (avoids noise)
-    n_colors = 2
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, .1)
-    flags = cv2.KMEANS_RANDOM_CENTERS
-    _, labels, palette = cv2.kmeans(pixels, n_colors, None, criteria, 3, flags)
+    start_y = y1 + int(crop_h * 0.4)
+    end_y = y1 + int(crop_h * 0.9)
+    start_x = x1 + int(crop_w * 0.2)
+    end_x = x1 + int(crop_w * 0.8)
     
-    # Find the most frequent color cluster
-    _, counts = np.unique(labels, return_counts=True)
-    dominant_bgr = palette[np.argmax(counts)]
+    vehicle_crop = frame[start_y:end_y, start_x:end_x]
     
-    # Convert dominant color to HSV for robust classification
-    bgr_patch = np.uint8([[dominant_bgr]])
-    hsv_patch = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
-    h_val, s_val, v_val = hsv_patch[0][0]
+    if vehicle_crop.size == 0:
+        return "Unknown"
+
+    # Convert to HSV for better color invariant clustering
+    hsv_crop = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2HSV)
     
-    # HSV Tuning (Hue 0-179, Saturation 0-255, Value 0-255)
-    if s_val < 40 and v_val > 180: return "White"
-    if v_val < 50: return "Black"
-    if s_val < 60 and 50 <= v_val <= 180: return "Silver/Grey"
+    # Reshape for K-Means
+    pixels = hsv_crop.reshape((-1, 3))
+    pixels = np.float32(pixels)
+
+    # Define criteria and apply kmeans()
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    K = 2
+    _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+    # Get the most dominant cluster
+    counts = np.bincount(labels.flatten())
+    dominant_cluster_idx = np.argmax(counts)
+    dominant_hsv = centers[dominant_cluster_idx]
     
-    if (0 <= h_val <= 10) or (160 <= h_val <= 179): return "Red"
-    elif 11 <= h_val <= 25: return "Orange"
-    elif 26 <= h_val <= 34: return "Yellow"
-    elif 35 <= h_val <= 85: return "Green"
-    elif 86 <= h_val <= 130: return "Blue"
-    elif 131 <= h_val <= 159: return "Purple"
+    hue = dominant_hsv[0]
+    sat = dominant_hsv[1]
+    val = dominant_hsv[2]
+
+    # Map Hue to Color Names
+    if sat < 40 and val > 180:
+        return "White"
+    elif sat < 50 and 50 < val <= 180:
+        return "Silver/Grey"
+    elif val <= 50:
+        return "Black"
+    elif 0 <= hue <= 10 or 160 <= hue <= 180:
+        return "Red"
+    elif 11 <= hue <= 25:
+        return "Orange"
+    elif 26 <= hue <= 34:
+        return "Yellow"
+    elif 35 <= hue <= 85:
+        return "Green"
+    elif 86 <= hue <= 125:
+        return "Blue"
+    elif 126 <= hue <= 159:
+        return "Purple"
     
     return "Unknown"
 
@@ -66,36 +86,39 @@ class InferenceThread(QThread):
     frame_ready = Signal(np.ndarray)
     stats_ready = Signal(dict)
 
-    def __init__(self, model_path="yolo11n.pt", source=0):
-        super().__init__()
-        self.model_path = model_path
+    def __init__(self, model_paths, source, session_name, parent=None):
+        super().__init__(parent)
+        self.model_paths = model_paths
         self.source = source
-        self.running = True
+        self.session_name = session_name
+        self.is_stopped = False
         self.paused = False
-        self.db_session = init_db()()
+        self.logged_violations = set()
+        os.makedirs("evidences", exist_ok=True)
         
-        self.counted_ids = set()
-        
-        # Track history for line crossing & speed logic
-        self.track_history = {} # track_id -> list of (cx, cy)
-        self.entry_frames = {}  # track_id -> frame number when entering Speed Zone (Line A)
-        self.vehicle_speeds = {} # track_id -> calculated speed (km/h)
+        # State tracking
+        self.track_history = {} # track_id -> [(cx, cy), ...]
+        self.entry_times = {} # track_id -> time crossed line A
+        self.counted_ids = set() # track_id -> bool
+        self.vehicle_speeds = {} # track_id -> speed
         self.vehicle_colors = {} # track_id -> detected color
         
-        # Mapping global track_id to class-specific ID
-        self.class_counts = {2: 0, 3: 0, 5: 0, 7: 0} 
-        self.global_to_class_id = {}
+        self.class_counts = defaultdict(int) 
         
         # Detection Configs (Set by UI)
         self.conf_threshold = 0.25
-        self.active_classes = [2, 3, 5, 7]
+        self.active_classes = []
         self.real_distance_m = 10.0 
-        self.color_threshold = 20000.0 # Obsolete with KMeans, kept for UI compatibility
+        self.color_threshold = 20000.0
         self.line_a_pct = 0.3
         self.line_b_pct = 0.7
         self.custom_regions = []
+        self.model_to_global = {}
 
-    def set_detection_config(self, conf, active_classes, real_distance_m, color_thresh, line_a, line_b, custom_regions=None):
+        # Init Database
+        self.SessionLocal = init_db()
+
+    def set_detection_config(self, conf, active_classes, real_distance_m, color_thresh, line_a, line_b, custom_regions=None, model_to_global=None):
         self.conf_threshold = conf
         self.active_classes = active_classes
         self.real_distance_m = real_distance_m
@@ -104,42 +127,47 @@ class InferenceThread(QThread):
         self.line_b_pct = line_b
         if custom_regions is not None:
             self.custom_regions = custom_regions
+        if model_to_global is not None:
+            self.model_to_global = model_to_global
 
     def pause_resume(self):
         self.paused = not self.paused
         return self.paused
 
+    def stop(self):
+        self.is_stopped = True
+        self.quit()
+        self.wait()
+
     def run(self):
-        print(f"Loading model from {self.model_path}...")
-        model = YOLO(self.model_path)
-        
+        db = self.SessionLocal()
+
         cap = cv2.VideoCapture(self.source)
         if not cap.isOpened():
-            print(f"Failed to open video source {self.source}")
+            print(f"Failed to open source: {self.source}")
             return
             
-        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0 or np.isnan(fps):
-            fps = 30.0 
-            
-        if width == 0 or height == 0:
-            width, height = 640, 480 
+        if fps == 0 or np.isnan(fps):
+            fps = 30.0
 
-        frame_count = 0
+        # Load all models dynamically
+        models = []
+        for path in self.model_paths:
+            print(f"Thread Loading: {path}")
+            models.append(YOLO(path, task='detect'))
 
-        while self.running and cap.isOpened():
+        while cap.isOpened() and not self.is_stopped:
             if self.paused:
-                self.msleep(50)
+                time.sleep(0.1)
                 continue
-                
+
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            frame_count += 1
-            
+                
             # Define 2 Speed Lines based on dynamic percentage
             line_a_y = int(height * self.line_a_pct)
             line_b_y = int(height * self.line_b_pct)
@@ -157,134 +185,169 @@ class InferenceThread(QThread):
                 cv2.fillPoly(overlay, [pts], r["color"])
                 cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
             
-            results = model.track(frame, persist=True, conf=self.conf_threshold, verbose=False)
+            # PARALLEL MULTI-MODEL EXECUTION
+            all_boxes = []
+            all_cls = []
+            all_conf = []
+            all_tids = []
             
-            current_in_frame = 0
-            
-            if results[0].boxes is not None and results[0].boxes.id is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
-                track_ids = results[0].boxes.id.cpu().numpy().astype(int)
-                classes = results[0].boxes.cls.cpu().numpy().astype(int)
+            for m_idx, model in enumerate(models):
+                m_path = self.model_paths[m_idx]
+                results = model.track(frame, persist=True, conf=self.conf_threshold, verbose=False)
                 
-                for box, track_id, cls in zip(boxes, track_ids, classes):
-                    if cls in self.active_classes:
-                        current_in_frame += 1
-                        x1, y1, x2, y2 = box
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
+                if results and results[0].boxes:
+                    for box in results[0].boxes:
+                        local_cls = int(box.cls[0].item())
                         
-                        # Map to Class Specific ID
-                        if track_id not in self.global_to_class_id:
-                            self.class_counts[cls] += 1
-                            self.global_to_class_id[track_id] = self.class_counts[cls]
-                        class_specific_id = self.global_to_class_id[track_id]
-                        
-                        # Detect Color once per vehicle using KMeans
-                        if track_id not in self.vehicle_colors:
-                            self.vehicle_colors[track_id] = get_dominant_color(frame, box, threshold=self.color_threshold)
-                        
-                        # History tracking (increased to 15 frames for better STOP detection)
-                        if track_id not in self.track_history:
-                            self.track_history[track_id] = []
-                        self.track_history[track_id].append((cx, cy))
-                        if len(self.track_history[track_id]) > 15:
-                            self.track_history[track_id].pop(0)
-                        
-                        is_stopped = False
-                        
-                        # Speed & Crossing & Stop Logic
-                        if len(self.track_history[track_id]) >= 2:
-                            prev_cx, prev_cy = self.track_history[track_id][-2]
+                        # Map to global ID
+                        if m_path in self.model_to_global and local_cls in self.model_to_global[m_path]:
+                            global_cls = self.model_to_global[m_path][local_cls]
+                        else:
+                            continue
                             
-                            # Check crossing Line A (Top)
-                            if (prev_cy < line_a_y and cy >= line_a_y) or (prev_cy > line_a_y and cy <= line_a_y):
-                                self.entry_frames[track_id] = frame_count
+                        if global_cls not in self.active_classes:
+                            continue
                             
-                            # Check crossing Line B (Bottom)
-                            if (prev_cy < line_b_y and cy >= line_b_y) or (prev_cy > line_b_y and cy <= line_b_y):
-                                if track_id in self.entry_frames and track_id not in self.counted_ids:
-                                    frames_taken = abs(frame_count - self.entry_frames[track_id])
-                                    time_taken = frames_taken / fps
-                                    
-                                    if time_taken > 0:
-                                        speed_ms = self.real_distance_m / time_taken
-                                        speed_kmh = int(speed_ms * 3.6)
-                                    else:
-                                        speed_kmh = 0
-                                        
-                                    self.vehicle_speeds[track_id] = speed_kmh
-                                    self.counted_ids.add(track_id)
-                                    
-                                    # Log to DB
-                                    class_name = model.names[cls]
-                                    v_color = self.vehicle_colors[track_id]
-                                    log = VehicleLog(
-                                        track_id=int(track_id), 
-                                        vehicle_class=class_name,
-                                        color=v_color,
-                                        speed_kmh=speed_kmh
-                                    )
-                                    self.db_session.add(log)
-                                    self.db_session.commit()
-
-                            # Stop Logic: Check if it moved less than 5 pixels over the last 15 frames
-                            if len(self.track_history[track_id]) >= 10:
-                                first_cx, first_cy = self.track_history[track_id][0]
-                                distance = np.sqrt((cx - first_cx)**2 + (cy - first_cy)**2)
-                                if distance < 5.0:
-                                    is_stopped = True
+                        all_boxes.append(box.xyxy[0].cpu().numpy())
+                        all_cls.append(global_cls)
+                        all_conf.append(box.conf[0].item())
                         
-                        # Region Intersection Logic
-                        bottom_center = (float(cx), float(y2))
-                        for r in scaled_regions:
-                            if cv2.pointPolygonTest(r["pts"], bottom_center, False) >= 0:
-                                region_counts[r["name"]] += 1
-
-                        # Draw Custom BBox and Colors
-                        color = CLASS_COLORS.get(cls, (255, 255, 255))
-                        if is_stopped:
-                            color = (0, 0, 255) # Red for stopped vehicle
-                            
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        
-                        # Draw center crosshair
-                        cv2.line(frame, (cx - 10, cy), (cx + 10, cy), color, 2)
-                        cv2.line(frame, (cx, cy - 10), (cx, cy + 10), color, 2)
-                        
-                        # Draw Label (ID, Color, Speed)
-                        class_name = model.names[cls].capitalize()
-                        v_color = self.vehicle_colors.get(track_id, "")
-                        v_speed = self.vehicle_speeds.get(track_id, "?")
-                        
-                        label_1 = f"{class_name} {class_specific_id} ({v_color})"
-                        if is_stopped:
-                            label_1 += " [STOP]"
-                            
-                        label_2 = f"{v_speed} km/h" if track_id in self.vehicle_speeds else "Measuring..."
-                        
-                        cv2.putText(frame, label_1, (x1, max(y1 - 25, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                        cv2.putText(frame, label_2, (x1, max(y1 - 10, 35)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                        if box.id is not None:
+                            t_id = int(box.id[0].item())
+                            global_t_id = f"{m_idx}_{t_id}"
+                            all_tids.append(global_t_id)
+                        else:
+                            all_tids.append(None)
             
-            # Emit to UI
+            current_in_frame = len(all_boxes)
+            
+            # Process all detected objects
+            for i in range(current_in_frame):
+                b = all_boxes[i]
+                cls = all_cls[i]
+                conf = all_conf[i]
+                t_id = all_tids[i]
+                
+                x1, y1, x2, y2 = map(int, b)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                
+                color = get_class_color(cls)
+                is_stopped = False
+                speed_text = ""
+                color_text = ""
+                stop_text = ""
+                label = ""
+                
+                if t_id is not None:
+                    if t_id not in self.track_history:
+                        self.track_history[t_id] = []
+                    self.track_history[t_id].append((cx, cy))
+                    
+                    if len(self.track_history[t_id]) > 15:
+                        self.track_history[t_id].pop(0)
+
+                    # Determine Color if not yet detected
+                    if t_id not in self.vehicle_colors:
+                        if (x2 - x1) > 20 and (y2 - y1) > 20: # Must be large enough to sample
+                            dominant_color = get_dominant_color(frame, b)
+                            if dominant_color != "Unknown":
+                                self.vehicle_colors[t_id] = dominant_color
+                            else:
+                                self.vehicle_colors[t_id] = "(Calculating)"
+                        else:
+                            self.vehicle_colors[t_id] = "(Too far)"
+
+                    # Stop logic (if distance moved in last 10 frames is very small)
+                    if len(self.track_history[t_id]) >= 10:
+                        first_cx, first_cy = self.track_history[t_id][0]
+                        distance = np.sqrt((cx - first_cx)**2 + (cy - first_cy)**2)
+                        if distance < 5.0:
+                            is_stopped = True
+                
+                    # Region Intersection Logic
+                    bottom_center = (float(cx), float(y2))
+                    in_region_name = None
+                    for r in scaled_regions:
+                        if cv2.pointPolygonTest(r["pts"], bottom_center, False) >= 0:
+                            region_counts[r["name"]] += 1
+                            in_region_name = r["name"]
+
+                    if is_stopped:
+                        color = (0, 0, 255) # Red for stopped vehicle
+                        
+                        # Trigger Violation Snapshot
+                        if in_region_name and t_id not in self.logged_violations:
+                            self.logged_violations.add(t_id)
+                            filename = f"evidences/{self.session_name}_{t_id}_{int(time.time())}.jpg"
+                            # Expand crop slightly
+                            crop = frame[max(0, y1-20):min(frame.shape[0], y2+20), max(0, x1-20):min(frame.shape[1], x2+20)]
+                            if crop.size > 0:
+                                cv2.imwrite(filename, crop)
+                                new_violation = ViolationLog(
+                                    session_name=self.session_name,
+                                    track_id=str(t_id),
+                                    vehicle_class=str(cls),
+                                    region_name=in_region_name,
+                                    image_path=filename
+                                )
+                                db.add(new_violation)
+                                db.commit()
+                        
+                    # Track Crossing A to B for Speed Calculation
+                    if t_id not in self.entry_times and cy > line_a_y - 20 and cy < line_a_y + 20:
+                        self.entry_times[t_id] = time.time()
+                        
+                    if t_id in self.entry_times and t_id not in self.vehicle_speeds and cy > line_b_y - 20 and cy < line_b_y + 20:
+                        delta_t = time.time() - self.entry_times[t_id]
+                        if delta_t > 0:
+                            speed_mps = self.real_distance_m / delta_t
+                            speed_kmh = speed_mps * 3.6
+                            self.vehicle_speeds[t_id] = speed_kmh
+                            
+                            # Logging to DB when speed is finalized
+                            new_log = VehicleLog(
+                                session_name=self.session_name,
+                                track_id=str(t_id),
+                                vehicle_class=str(cls),
+                                color=self.vehicle_colors.get(t_id, "Unknown"),
+                                speed_kmh=speed_kmh
+                            )
+                            db.add(new_log)
+                            db.commit()
+                            
+                    # Counting Logic
+                    if t_id not in self.counted_ids and cy > line_b_y:
+                        self.counted_ids.add(t_id)
+                        self.class_counts[cls] += 1
+                        
+                    # Annotations for tracked object
+                    speed_text = f"{self.vehicle_speeds[t_id]:.0f} km/h" if t_id in self.vehicle_speeds else "Measuring..."
+                    color_text = self.vehicle_colors.get(t_id, "")
+                    stop_text = "[STOP]" if is_stopped else ""
+                    label = f"ID:{t_id} ({color_text}) {stop_text}"
+                else:
+                    # Fallback for untracked objects
+                    label = f"Detected (No ID)"
+                    
+                # DRAW EVERYTHING (Tracked and Untracked)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                if speed_text:
+                    cv2.putText(frame, speed_text, (x1, y2 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            
             annotated_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.frame_ready.emit(annotated_frame_rgb)
             
             # Send stats
+            counts_per_class = {cls_id: count for cls_id, count in self.class_counts.items()}
+            
             self.stats_ready.emit({
                 "current_in_frame": current_in_frame,
                 "total_counted": len(self.counted_ids),
-                "counts_per_class": {
-                    "car": self.class_counts.get(2, 0),
-                    "motorcycle": self.class_counts.get(3, 0),
-                    "bus": self.class_counts.get(5, 0),
-                    "truck": self.class_counts.get(7, 0)
-                },
+                "counts_per_class": counts_per_class,
                 "region_counts": region_counts
             })
             
+        db.close()
         cap.release()
-        self.db_session.close()
-
-    def stop(self):
-        self.running = False
-        self.wait()
