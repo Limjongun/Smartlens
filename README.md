@@ -1,5 +1,7 @@
 # SmartLens: Advanced Spatial Analytics & Vehicle Tracking
 
+![SmartLens Dashboard](screenshot.png)
+
 SmartLens is a high-performance computer vision application built on top of YOLOv11 and PySide6. It goes beyond traditional object detection by providing an interactive spatial analytics canvas, allowing users to measure speeds, classify vehicle colors using AI clustering, and define custom tracking zones dynamically.
 
 ## Key Features
